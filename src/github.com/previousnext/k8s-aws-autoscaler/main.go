@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/alecthomas/kingpin"
@@ -25,13 +25,23 @@ var (
 func main() {
 	kingpin.Parse()
 
-	log.Println("Starting Autoscaler")
+	fmt.Println("Starting Autoscaler")
 
 	if *cliDryRun {
-		log.Println("Running in dry run mode")
+		fmt.Println("Running in dry run mode")
 	}
 
-	limiter := time.Tick(*cliFrequency)
+	// We use the ec2metadata service to determine the region of the ASGs.
+	meta := ec2metadata.New(session.New(), &aws.Config{})
+	region, err := meta.Region()
+	if err != nil {
+		panic(err)
+	}
+
+	var (
+		svc     = autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
+		limiter = time.Tick(*cliFrequency)
+	)
 
 	for {
 		<-limiter
@@ -39,122 +49,58 @@ func main() {
 		// Creates the in-cluster config.
 		config, err := rest.InClusterConfig()
 		if err != nil {
-			log.Println(err)
-			continue
+			panic(err)
 		}
 
 		// Creates the clientset for querying APIs.
 		k8s, err := kubernetes.NewForConfig(config)
 		if err != nil {
-			log.Println(err)
-			continue
+			panic(err)
 		}
 
-		// Build an Autoscaling client.
-		// We use the ec2metadata service to determine the region of the ASGs.
-		meta := ec2metadata.New(session.New(), &aws.Config{})
-		region, err := meta.Region()
+		fmt.Println("Looking up Autoscaling Group")
+
+		asg, size, err := lookupASG(svc, region)
 		if err != nil {
-			log.Println(err)
-			continue
-		}
-		svc := autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
-
-		// Query the ASGs based on the names provided.
-		asgs, err := svc.DescribeAutoScalingGroups(&autoscaling.DescribeAutoScalingGroupsInput{
-			AutoScalingGroupNames: []*string{cliGroup},
-			MaxRecords:            aws.Int64(int64(1)),
-		})
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		if len(asgs.AutoScalingGroups) != 1 {
-			log.Println("Failed to lookup the ASG")
-			continue
-		}
-
-		// This is the ASG we are looking for.
-		asg := asgs.AutoScalingGroups[0]
-
-		// Load up the pods and determine how much resource in total we require.
-		pods, err := k8s.Pods(v1.NamespaceAll).List(metav1.ListOptions{})
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		var (
-			// These are the resource totals which we will be comparing against how many
-			// machines we need to furfil the cluster.
-			cpu int
-			mem int
-		)
-
-		for _, pod := range pods.Items {
-			// We only want to know about Pending and Running pods. These trigger scaling events.
-			if pod.Status.Phase != v1.PodRunning || pod.Status.Phase != v1.PodPending {
-				continue
-			}
-
-			for _, con := range pod.Spec.Containers {
-				reqCPU := con.Resources.Requests[v1.ResourceCPU]
-				reqMem := con.Resources.Requests[v1.ResourceMemory]
-
-				cpu = cpu + int(reqCPU.MilliValue())
-				mem = mem + int(reqMem.Value()/1024.0/1024.0)
-			}
-		}
-
-		log.Printf("Kubernetes requires the following amount to run CPU %d / Memory %d", cpu, mem)
-
-		// Determine the type of instance has been deployed for this ASG.
-		// To get this information, we need to load the "Launch Configuration".
-		cfgs, err := svc.DescribeLaunchConfigurations(&autoscaling.DescribeLaunchConfigurationsInput{
-			LaunchConfigurationNames: []*string{
-				asg.LaunchConfigurationName,
-			},
-			MaxRecords: aws.Int64(1),
-		})
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		if len(cfgs.LaunchConfigurations) != 1 {
-			log.Println("Failed to lookup the ASG Launch Configuration:", *asg.LaunchConfigurationName)
-			continue
-		}
-
-		// Query the instance type against our internal database eg. t2.medium = 2 CPUs + 4GB of Memory.
-		inst, err := getInstanceType(*cfgs.LaunchConfigurations[0].InstanceType)
-		if err != nil {
-			log.Println("Failed to lookup the instance type:", *cfgs.LaunchConfigurations[0].InstanceType)
+			fmt.Println(err)
 			continue
 		}
 
 		// Apply the buffer to each instance type.
 		//   eg. 4000GB -> 3600GB (0.9)
-		inst.CPU = int(float64(inst.CPU) * *cliBuffer)
-		inst.Memory = int(float64(inst.Memory) * *cliBuffer)
+		size.CPU = int(float64(size.CPU) * *cliBuffer)
+		size.Memory = int(float64(size.Memory) * *cliBuffer)
 
-		desired := int64(scaler(cpu, mem, inst))
+		fmt.Println("Calculating Pod requests")
+
+		cpu, mem, err := podRequests(k8s)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		// @todo, fmt.Println("Calculating CronJob requests")
+
+		fmt.Printf("Kubernetes requires the following amount to run CPU %d / Memory %d", cpu, mem)
+
+		desired := int64(scaler(cpu, mem, size))
 
 		if desired < *asg.MinSize {
-			log.Printf("The desired capacity (%d) is less than the ASG minimum constraint (%d)", desired, *asg.DesiredCapacity)
+			fmt.Printf("The desired capacity (%d) is less than the ASG minimum constraint (%d)", desired, *asg.DesiredCapacity)
 			desired = *asg.MinSize
 		}
 
 		if desired > *asg.MaxSize {
-			log.Printf("The desired capacity (%d) is more than the ASG maximum constraint (%d)", desired, *asg.DesiredCapacity)
+			fmt.Printf("The desired capacity (%d) is more than the ASG maximum constraint (%d)", desired, *asg.DesiredCapacity)
 			desired = *asg.MaxSize
 		}
 
 		if desired == *asg.DesiredCapacity {
-			log.Printf("The desired capacity (%d) has not changed", *asg.DesiredCapacity)
+			fmt.Printf("The desired capacity (%d) has not changed", *asg.DesiredCapacity)
 			continue
 		}
 
-		log.Printf("Setting the desired capacity from %d to %d", *asg.DesiredCapacity, desired)
+		fmt.Printf("Setting the desired capacity from %d to %d", *asg.DesiredCapacity, desired)
 
 		// Don't make any changes. Perfect for debugging.
 		if *cliDryRun {
@@ -166,7 +112,78 @@ func main() {
 			DesiredCapacity:      aws.Int64(desired),
 		})
 		if err != nil {
-			log.Println(err)
+			fmt.Println(err)
 		}
 	}
+}
+
+// Step which looks up the ASG and returns it.
+func lookupASG(svc *autoscaling.AutoScaling, region string) (*autoscaling.Group, *InstanceType, error) {
+	// Query the ASGs based on the names provided.
+	asgs, err := svc.DescribeAutoScalingGroups(&autoscaling.DescribeAutoScalingGroupsInput{
+		AutoScalingGroupNames: []*string{cliGroup},
+		MaxRecords:            aws.Int64(int64(1)),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(asgs.AutoScalingGroups) != 1 {
+		return nil, nil, fmt.Errorf("Failed to lookup the ASG")
+	}
+
+	asg := asgs.AutoScalingGroups[0]
+
+	// Determine the type of instance has been deployed for this ASG.
+	// To get this information, we need to load the "Launch Configuration".
+	cfgs, err := svc.DescribeLaunchConfigurations(&autoscaling.DescribeLaunchConfigurationsInput{
+		LaunchConfigurationNames: []*string{
+			asg.LaunchConfigurationName,
+		},
+		MaxRecords: aws.Int64(1),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(cfgs.LaunchConfigurations) != 1 {
+		return nil, nil, fmt.Errorf("Failed to lookup the ASG Launch Configuration:", *asg.LaunchConfigurationName)
+	}
+
+	instanceType, err := getInstanceType(*cfgs.LaunchConfigurations[0].InstanceType)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return asg, instanceType, nil
+}
+
+// Step which calculates how much CPU + Memory is required to run all the pods on the cluster.
+func podRequests(k8s *kubernetes.Clientset) (int, int, error) {
+	var (
+		cpu int
+		mem int
+	)
+
+	pods, err := k8s.Pods(v1.NamespaceAll).List(metav1.ListOptions{})
+	if err != nil {
+		return cpu, mem, err
+	}
+
+	for _, pod := range pods.Items {
+		// We only want to know about Pending and Running pods. These trigger scaling events.
+		if pod.Status.Phase != v1.PodRunning || pod.Status.Phase != v1.PodPending {
+			continue
+		}
+
+		for _, con := range pod.Spec.Containers {
+			reqCPU := con.Resources.Requests[v1.ResourceCPU]
+			reqMem := con.Resources.Requests[v1.ResourceMemory]
+
+			cpu = cpu + int(reqCPU.MilliValue())
+			mem = mem + int(reqMem.Value()/1024.0/1024.0)
+		}
+	}
+
+	return cpu, mem, nil
 }

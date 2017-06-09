@@ -1,11 +1,11 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 )
 
-var InstanceTypes = []InstanceType{
-	InstanceType{
+var InstanceTypes = []*InstanceType{
+	&InstanceType{
 		Name:   "t2.medium",
 		CPU:    2000,
 		Memory: 4000,
@@ -18,11 +18,11 @@ type InstanceType struct {
 	Memory int
 }
 
-func getInstanceType(t string) (InstanceType, error) {
+func getInstanceType(t string) (*InstanceType, error) {
 	for _, i := range InstanceTypes {
 		if i.Name == t {
 			return i, nil
 		}
 	}
-	return InstanceType{}, errors.New("Failed to find instance type")
+	return nil, fmt.Errorf("Failed to find instance type")
 }

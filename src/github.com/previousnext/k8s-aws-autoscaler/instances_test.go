@@ -14,6 +14,6 @@ func TestGetInstanceType(t *testing.T) {
 		Memory: 4000,
 	}, i, "Found t2.medium")
 
-	i, _ = getInstanceType("t20.medium")
+	i, _ = getInstanceType("t2.medium")
 	assert.Equal(t, InstanceType{}, i, "Could not find t20.medium")
 }
