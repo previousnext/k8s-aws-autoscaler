@@ -19,6 +19,7 @@ var (
 	cliGroup     = kingpin.Flag("group", "The Autoscaling group to update periodically").OverrideDefaultFromEnvar("GROUP").Default("").String()
 	cliFrequency = kingpin.Flag("frequency", "How often to run the check").OverrideDefaultFromEnvar("FREQUENCY").Default("120s").Duration()
 	cliBuffer    = kingpin.Flag("buffer", "Allows for hosts to have buffer eg. 80% full").OverrideDefaultFromEnvar("BUFFER").Default("0.9").Float64()
+	cliScaleDown = kingpin.Flag("scale-down-timeout", "How long to wait before scaling down (in minutes)").OverrideDefaultFromEnvar("SCALE_DOWN_TIMEOUT").Default("60").Float64()
 	cliDryRun    = kingpin.Flag("dry", "Don't make any changes!").Bool()
 )
 
@@ -39,8 +40,9 @@ func main() {
 	}
 
 	var (
-		svc     = autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
-		limiter = time.Tick(*cliFrequency)
+		svc      = autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
+		limiter  = time.Tick(*cliFrequency)
+		lastDown = time.Now()
 	)
 
 	for {
@@ -97,6 +99,12 @@ func main() {
 
 		if desired == *asg.DesiredCapacity {
 			fmt.Printf("The desired capacity (%d) has not changed", *asg.DesiredCapacity)
+			continue
+		}
+
+		// Check if this is a "down scale" event and if we have had one of these in the past X minutes.
+		if desired < *asg.DesiredCapacity && time.Now().Sub(lastDown).Minutes() > *cliScaleDown {
+			fmt.Printf("Skipping this scale down event because cooldown is set to %d minutes", *cliScaleDown)
 			continue
 		}
 
