@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	cliGroup     = kingpin.Flag("group", "The Autoscaling group to update periodically").OverrideDefaultFromEnvar("GROUP").Default("").String()
-	cliFrequency = kingpin.Flag("frequency", "How often to run the check").OverrideDefaultFromEnvar("FREQUENCY").Default("120s").Duration()
-	cliBuffer    = kingpin.Flag("buffer", "Allows for hosts to have buffer eg. 80% full").OverrideDefaultFromEnvar("BUFFER").Default("0.9").Float64()
-	cliScaleDown = kingpin.Flag("scale-down-timeout", "How long to wait before scaling down (in minutes)").OverrideDefaultFromEnvar("SCALE_DOWN_TIMEOUT").Default("60").Float64()
-	cliDryRun    = kingpin.Flag("dry", "Don't make any changes!").Bool()
+	cliGroup      = kingpin.Flag("group", "The Autoscaling group to update periodically").OverrideDefaultFromEnvar("GROUP").Default("").String()
+	cliFrequency  = kingpin.Flag("frequency", "How often to run the check").OverrideDefaultFromEnvar("FREQUENCY").Default("120s").Duration()
+	cliBuffer     = kingpin.Flag("buffer", "Allows for hosts to have buffer eg. 80% full").OverrideDefaultFromEnvar("BUFFER").Default("0.9").Float64()
+	cliCronWeight = kingpin.Flag("cronjob-weight", "How much CronJobs should reflect autoscaling eg. 0.5 means provide half the resources").OverrideDefaultFromEnvar("CRONJOB_WEIGHT").Default("0.5").Float64()
+	cliScaleDown  = kingpin.Flag("scale-down-timeout", "How long to wait before scaling down (in minutes)").OverrideDefaultFromEnvar("SCALE_DOWN_TIMEOUT").Default("60").Float64()
+	cliDryRun     = kingpin.Flag("dry", "Don't make any changes!").Bool()
 )
 
 func main() {
@@ -75,13 +76,28 @@ func main() {
 
 		fmt.Println("Calculating Pod requests")
 
-		cpu, mem, err := podRequests(k8s)
+		cpuPod, memPod, err := podRequests(k8s)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
 
-		// @todo, fmt.Println("Calculating CronJob requests")
+		fmt.Println("Calculating CronJob requests")
+
+		cpuCron, memCron, err := cronRequests(k8s)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		// Apply the "what are CronJobs worth" weight.
+		cpuCron = cpuCron * *cliCronWeight
+		memCron = memCron * *cliCronWeight
+
+		var (
+			cpu = int(cpuPod + cpuCron)
+			mem = int(memPod + memCron)
+		)
 
 		fmt.Printf("Kubernetes requires the following amount to run CPU %d / Memory %d", cpu, mem)
 
@@ -167,10 +183,10 @@ func lookupASG(svc *autoscaling.AutoScaling, region string) (*autoscaling.Group,
 }
 
 // Step which calculates how much CPU + Memory is required to run all the pods on the cluster.
-func podRequests(k8s *kubernetes.Clientset) (int, int, error) {
+func podRequests(k8s *kubernetes.Clientset) (float64, float64, error) {
 	var (
-		cpu int
-		mem int
+		cpu float64
+		mem float64
 	)
 
 	pods, err := k8s.Pods(v1.NamespaceAll).List(metav1.ListOptions{})
@@ -188,8 +204,34 @@ func podRequests(k8s *kubernetes.Clientset) (int, int, error) {
 			reqCPU := con.Resources.Requests[v1.ResourceCPU]
 			reqMem := con.Resources.Requests[v1.ResourceMemory]
 
-			cpu = cpu + int(reqCPU.MilliValue())
-			mem = mem + int(reqMem.Value()/1024.0/1024.0)
+			cpu = cpu + float64(reqCPU.MilliValue())
+			mem = mem + float64(reqMem.Value()/1024.0/1024.0)
+		}
+	}
+
+	return cpu, mem, nil
+}
+
+// Step which calculates how much CPU + Memory is required to run all the Cron Jobs on the cluster.
+func cronRequests(k8s *kubernetes.Clientset) (float64, float64, error) {
+	var (
+		cpu float64
+		mem float64
+	)
+
+	crons, err := k8s.BatchV2alpha1().CronJobs(v1.NamespaceAll).List(metav1.ListOptions{})
+	if err != nil {
+		return cpu, mem, err
+	}
+
+	for _, cron := range crons.Items {
+		// Specs all the way down!
+		for _, container := range cron.Spec.JobTemplate.Spec.Template.Spec.Containers {
+			reqCPU := container.Resources.Requests[v1.ResourceCPU]
+			reqMem := container.Resources.Requests[v1.ResourceMemory]
+
+			cpu = cpu + float64(reqCPU.MilliValue())
+			mem = mem + float64(reqMem.Value()/1024.0/1024.0)
 		}
 	}
 
