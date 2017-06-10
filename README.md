@@ -5,10 +5,10 @@ A simple autoscaler for Kubernetes + AWS using the Deployments API.
 
 ## How it works
 
-Using the K8s Deployment API we use the following formula:
+Using the K8s Deployment API we have the following formula:
 
 ```
-Total CPU / Memory requests + "extra" instances = Desired amount of instances
+CPU / Memory requests + "extra" instances = Desired amount of instances
 ```
 
 The "extra" instances allow for buffer when running dynamically provisioned pods eg. Jobs.
