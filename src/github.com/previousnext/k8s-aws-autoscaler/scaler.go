@@ -1,6 +1,6 @@
 package main
 
-func scaler(cpu, memory int, instance *InstanceType) int {
+func scaler(cpu, memory int, instance InstanceType) int {
 	// How many instances does the memory require.
 	// Given memory is the most popular, we assume it as the desired.
 	d := memory / instance.Memory

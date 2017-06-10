@@ -9,19 +9,16 @@ import (
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/pkg/api/v1"
 	"k8s.io/client-go/rest"
 )
 
 var (
-	cliGroup      = kingpin.Flag("group", "The Autoscaling group to update periodically").OverrideDefaultFromEnvar("GROUP").Default("").String()
-	cliFrequency  = kingpin.Flag("frequency", "How often to run the check").OverrideDefaultFromEnvar("FREQUENCY").Default("120s").Duration()
-	cliBuffer     = kingpin.Flag("buffer", "Allows for hosts to have buffer eg. 80% full").OverrideDefaultFromEnvar("BUFFER").Default("0.9").Float64()
-	cliCronWeight = kingpin.Flag("cronjob-weight", "How much CronJobs should reflect autoscaling eg. 0.5 means provide half the resources").OverrideDefaultFromEnvar("CRONJOB_WEIGHT").Default("0.5").Float64()
-	cliScaleDown  = kingpin.Flag("scale-down-timeout", "How long to wait before scaling down (in minutes)").OverrideDefaultFromEnvar("SCALE_DOWN_TIMEOUT").Default("60").Float64()
-	cliDryRun     = kingpin.Flag("dry", "Don't make any changes!").Bool()
+	cliGroup     = kingpin.Flag("group", "The Autoscaling group to update periodically").OverrideDefaultFromEnvar("GROUP").Default("").String()
+	cliFrequency = kingpin.Flag("frequency", "How often to run the check").OverrideDefaultFromEnvar("FREQUENCY").Default("120s").Duration()
+	cliExtras    = kingpin.Flag("extras", "Additional 'buffer' instances").OverrideDefaultFromEnvar("EXTRAS").Default("1").Int64()
+	cliScaleDown = kingpin.Flag("scale-down-timeout", "How long to wait before scaling down (in minutes)").OverrideDefaultFromEnvar("SCALE_DOWN_TIMEOUT").Default("60").Float64()
+	cliDryRun    = kingpin.Flag("dry", "Don't make any changes!").Bool()
 )
 
 func main() {
@@ -43,7 +40,7 @@ func main() {
 	var (
 		svc      = autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
 		limiter  = time.Tick(*cliFrequency)
-		lastDown = time.Now()
+		prevDown = time.Now()
 	)
 
 	for {
@@ -69,62 +66,42 @@ func main() {
 			continue
 		}
 
-		// Apply the buffer to each instance type.
-		//   eg. 4000GB -> 3600GB (0.9)
-		size.CPU = int(float64(size.CPU) * *cliBuffer)
-		size.Memory = int(float64(size.Memory) * *cliBuffer)
+		fmt.Println("Calculating Deployments requests")
 
-		fmt.Println("Calculating Pod requests")
-
-		cpuPod, memPod, err := podRequests(k8s)
+		cpu, mem, err := deploymentRequests(k8s)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
 
-		fmt.Println("Calculating CronJob requests")
+		fmt.Printf("Kubernetes Deployments require the following amount to run CPU %d / Memory %d\n", cpu, mem)
 
-		cpuCron, memCron, err := cronRequests(k8s)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
+		desired := int64(scaler(cpu, mem, size)) + *cliExtras
 
-		// Apply the "what are CronJobs worth" weight.
-		cpuCron = cpuCron * *cliCronWeight
-		memCron = memCron * *cliCronWeight
-
-		var (
-			cpu = int(cpuPod + cpuCron)
-			mem = int(memPod + memCron)
-		)
-
-		fmt.Printf("Kubernetes requires the following amount to run CPU %d / Memory %d", cpu, mem)
-
-		desired := int64(scaler(cpu, mem, size))
+		fmt.Printf("The desired amount is: %d\n", desired)
 
 		if desired < *asg.MinSize {
-			fmt.Printf("The desired capacity (%d) is less than the ASG minimum constraint (%d)", desired, *asg.DesiredCapacity)
+			fmt.Printf("The desired capacity (%d) is less than the ASG minimum constraint (%d)\n", desired, *asg.MinSize)
 			desired = *asg.MinSize
 		}
 
 		if desired > *asg.MaxSize {
-			fmt.Printf("The desired capacity (%d) is more than the ASG maximum constraint (%d)", desired, *asg.DesiredCapacity)
+			fmt.Printf("The desired capacity (%d) is more than the ASG maximum constraint (%d)\n", desired, *asg.MaxSize)
 			desired = *asg.MaxSize
 		}
 
 		if desired == *asg.DesiredCapacity {
-			fmt.Printf("The desired capacity (%d) has not changed", *asg.DesiredCapacity)
+			fmt.Printf("The desired capacity (%d) has not changed\n", *asg.DesiredCapacity)
 			continue
 		}
 
 		// Check if this is a "down scale" event and if we have had one of these in the past X minutes.
-		if desired < *asg.DesiredCapacity && time.Now().Sub(lastDown).Minutes() > *cliScaleDown {
-			fmt.Printf("Skipping this scale down event because cooldown is set to %d minutes", *cliScaleDown)
+		if desired < *asg.DesiredCapacity && time.Now().Sub(prevDown).Minutes() < *cliScaleDown {
+			fmt.Println("Skipping this scale down event because: Cooling down")
 			continue
 		}
 
-		fmt.Printf("Setting the desired capacity from %d to %d", *asg.DesiredCapacity, desired)
+		fmt.Printf("Setting the desired capacity from %d to %d\n", *asg.DesiredCapacity, desired)
 
 		// Don't make any changes. Perfect for debugging.
 		if *cliDryRun {
@@ -138,102 +115,10 @@ func main() {
 		if err != nil {
 			fmt.Println(err)
 		}
-	}
-}
 
-// Step which looks up the ASG and returns it.
-func lookupASG(svc *autoscaling.AutoScaling, region string) (*autoscaling.Group, *InstanceType, error) {
-	// Query the ASGs based on the names provided.
-	asgs, err := svc.DescribeAutoScalingGroups(&autoscaling.DescribeAutoScalingGroupsInput{
-		AutoScalingGroupNames: []*string{cliGroup},
-		MaxRecords:            aws.Int64(int64(1)),
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if len(asgs.AutoScalingGroups) != 1 {
-		return nil, nil, fmt.Errorf("Failed to lookup the ASG")
-	}
-
-	asg := asgs.AutoScalingGroups[0]
-
-	// Determine the type of instance has been deployed for this ASG.
-	// To get this information, we need to load the "Launch Configuration".
-	cfgs, err := svc.DescribeLaunchConfigurations(&autoscaling.DescribeLaunchConfigurationsInput{
-		LaunchConfigurationNames: []*string{
-			asg.LaunchConfigurationName,
-		},
-		MaxRecords: aws.Int64(1),
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if len(cfgs.LaunchConfigurations) != 1 {
-		return nil, nil, fmt.Errorf("Failed to lookup the ASG Launch Configuration:", *asg.LaunchConfigurationName)
-	}
-
-	instanceType, err := getInstanceType(*cfgs.LaunchConfigurations[0].InstanceType)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return asg, instanceType, nil
-}
-
-// Step which calculates how much CPU + Memory is required to run all the pods on the cluster.
-func podRequests(k8s *kubernetes.Clientset) (float64, float64, error) {
-	var (
-		cpu float64
-		mem float64
-	)
-
-	pods, err := k8s.Pods(v1.NamespaceAll).List(metav1.ListOptions{})
-	if err != nil {
-		return cpu, mem, err
-	}
-
-	for _, pod := range pods.Items {
-		// We only want to know about Pending and Running pods. These trigger scaling events.
-		if pod.Status.Phase != v1.PodRunning || pod.Status.Phase != v1.PodPending {
-			continue
-		}
-
-		for _, con := range pod.Spec.Containers {
-			reqCPU := con.Resources.Requests[v1.ResourceCPU]
-			reqMem := con.Resources.Requests[v1.ResourceMemory]
-
-			cpu = cpu + float64(reqCPU.MilliValue())
-			mem = mem + float64(reqMem.Value()/1024.0/1024.0)
+		// We have successfully scaled down the cluster. Lets take a note of when this happened for next time.
+		if desired < *asg.DesiredCapacity {
+			prevDown = time.Now()
 		}
 	}
-
-	return cpu, mem, nil
-}
-
-// Step which calculates how much CPU + Memory is required to run all the Cron Jobs on the cluster.
-func cronRequests(k8s *kubernetes.Clientset) (float64, float64, error) {
-	var (
-		cpu float64
-		mem float64
-	)
-
-	crons, err := k8s.BatchV2alpha1().CronJobs(v1.NamespaceAll).List(metav1.ListOptions{})
-	if err != nil {
-		return cpu, mem, err
-	}
-
-	for _, cron := range crons.Items {
-		// Specs all the way down!
-		for _, container := range cron.Spec.JobTemplate.Spec.Template.Spec.Containers {
-			reqCPU := container.Resources.Requests[v1.ResourceCPU]
-			reqMem := container.Resources.Requests[v1.ResourceMemory]
-
-			cpu = cpu + float64(reqCPU.MilliValue())
-			mem = mem + float64(reqMem.Value()/1024.0/1024.0)
-		}
-	}
-
-	return cpu, mem, nil
 }
