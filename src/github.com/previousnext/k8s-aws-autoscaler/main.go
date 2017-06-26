@@ -38,9 +38,9 @@ func main() {
 	}
 
 	var (
-		svc      = autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
-		limiter  = time.Tick(*cliFrequency)
-		prevDown = time.Now()
+		svc       = autoscaling.New(session.New(&aws.Config{Region: aws.String(region)}))
+		limiter   = time.Tick(*cliFrequency)
+		prevScale = time.Now()
 	)
 
 	for {
@@ -96,7 +96,7 @@ func main() {
 		}
 
 		// Check if this is a "down scale" event and if we have had one of these in the past X minutes.
-		if desired < *asg.DesiredCapacity && time.Now().Sub(prevDown).Minutes() < *cliScaleDown {
+		if desired < *asg.DesiredCapacity && time.Now().Sub(prevScale).Minutes() < *cliScaleDown {
 			fmt.Println("Skipping this scale down event because: Cooling down")
 			continue
 		}
@@ -116,9 +116,6 @@ func main() {
 			fmt.Println(err)
 		}
 
-		// We have successfully scaled down the cluster. Lets take a note of when this happened for next time.
-		if desired < *asg.DesiredCapacity {
-			prevDown = time.Now()
-		}
+		prevScale = time.Now()
 	}
 }
