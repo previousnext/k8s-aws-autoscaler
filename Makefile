@@ -1,9 +1,13 @@
 #!/usr/bin/make -f
 
+VERSION=$(shell git describe --tags --always)
+
+release: build push
+
 build:
-	./hack/build.sh linux server k8s-aws-autoscaler github.com/previousnext/k8s-aws-autoscaler
+	docker build -t previousnext/k8s-aws-autoscaler:${VERSION} .
 
-image:
-	docker build --no-cache -t previousnext/k8s-aws-autoscaler:latest .
+push:
+	docker push previousnext/k8s-aws-autoscaler:${VERSION}
 
-.PHONY: build image
+.PHONY: build push
