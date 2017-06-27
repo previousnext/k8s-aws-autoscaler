@@ -1,5 +1,5 @@
 FROM golang:1.8 as builder
-ADD . /go
+ADD workspace /go
 RUN make build
 
 FROM alpine:latest
