@@ -39,7 +39,7 @@ func lookupASG(svc *autoscaling.AutoScaling, region string) (*autoscaling.Group,
 	}
 
 	if len(cfgs.LaunchConfigurations) != 1 {
-		return nil, instanceType, fmt.Errorf("Failed to lookup the ASG Launch Configuration:", *asg.LaunchConfigurationName)
+		return nil, instanceType, fmt.Errorf("failed to lookup the ASG Launch Configuration: %s", *asg.LaunchConfigurationName)
 	}
 
 	instanceType, err = getInstanceType(*cfgs.LaunchConfigurations[0].InstanceType)

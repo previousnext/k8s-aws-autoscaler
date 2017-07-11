@@ -13,6 +13,13 @@ The "extra" instances allow for buffer when running dynamically provisioned pods
 
 ## Development
 
+**Run the tests**
+
+```bash
+make lint
+make test
+```
+
 **Build the binary**
 
 ```bash
