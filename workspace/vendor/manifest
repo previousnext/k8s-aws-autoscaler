@@ -80,6 +80,13 @@
 			"path": "/service/sts"
 		},
 		{
+			"importpath": "github.com/davecgh/go-spew/spew",
+			"repository": "https://github.com/davecgh/go-spew",
+			"revision": "782f4967f2dc4564575ca782fe2d04090b5faca8",
+			"branch": "master",
+			"path": "/spew"
+		},
+		{
 			"importpath": "github.com/docker/distribution/digestset",
 			"repository": "https://github.com/docker/distribution",
 			"revision": "1e2f10eb65743fed02f573d31a4587de09afb20e",
@@ -237,10 +244,24 @@
 			"branch": "master"
 		},
 		{
+			"importpath": "github.com/pmezard/go-difflib/difflib",
+			"repository": "https://github.com/pmezard/go-difflib",
+			"revision": "792786c7400a136282c1664665ae0a8db921c6c2",
+			"branch": "master",
+			"path": "/difflib"
+		},
+		{
 			"importpath": "github.com/spf13/pflag",
 			"repository": "https://github.com/spf13/pflag",
 			"revision": "e57e3eeb33f795204c1ca35f56c44f83227c6e66",
 			"branch": "master"
+		},
+		{
+			"importpath": "github.com/stretchr/testify/assert",
+			"repository": "https://github.com/stretchr/testify",
+			"revision": "f6abca593680b2315d2075e0f5e2a9751e3f431a",
+			"branch": "master",
+			"path": "/assert"
 		},
 		{
 			"importpath": "github.com/ugorji/go/codec",
