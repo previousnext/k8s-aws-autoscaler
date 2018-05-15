@@ -42,7 +42,7 @@ func Watch(w io.Writer, params WatchParams) error {
 	meta := ec2metadata.New(session.New(), &aws.Config{})
 	region, err := meta.Region()
 	if err != nil {
-		panic(err)
+		return errors.Wrap(err, "failed to lookup region")
 	}
 
 	var (
@@ -57,27 +57,27 @@ func Watch(w io.Writer, params WatchParams) error {
 		// Creates the in-cluster config.
 		config, err := rest.InClusterConfig()
 		if err != nil {
-			return err
+			return errors.Wrap(err, "failed to get k8s incluster config")
 		}
 
 		// Creates the clientset for querying APIs.
 		k8s, err := kubernetes.NewForConfig(config)
 		if err != nil {
-			return errors.Wrap(err, "")
+			return errors.Wrap(err, "failed to get k8s client")
 		}
 
 		fmt.Println("Looking up Autoscaling Group")
 
 		asg, err := getScalingGroup(svc, params.Group, region)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "failed to get AWS autoscaling group")
 		}
 
 		fmt.Println("Calculating Deployments requests")
 
 		cpu, mem, err := getDeploymentRequests(k8s)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "failed to calculate total Deployment requests")
 		}
 
 		fmt.Printf("Kubernetes Deployments require the following amount to run CPU %d / Memory %d\n", cpu, mem)
