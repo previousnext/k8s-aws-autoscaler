@@ -1,8 +1,13 @@
-FROM golang:1.8 as builder
-ADD workspace /go
+FROM golang:1.8 as build
+ADD . /go/src/github.com/previousnext/k8s-backup
+RUN go get github.com/mitchellh/gox
+WORKDIR /go/src/github.com/previousnext/k8s-backup
 RUN make build
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-COPY --from=builder /go/bin/linux/server/k8s-aws-autoscaler /usr/local/bin/k8s-aws-autoscaler
-CMD ["k8s-aws-autoscaler"]
+FROM alpine:3.7
+RUN apk -v --update add ca-certificates python py-pip groff less mailcap mariadb-client && \
+    pip install --upgrade awscli==1.14.5 s3cmd==2.0.1 python-magic && \
+    apk -v --purge del py-pip && \
+    rm /var/cache/apk/*
+COPY --from=build /go/src/github.com/previousnext/k8s-backup/bin/k8s-backup_linux_amd64 /usr/local/bin/k8s-backup
+ENTRYPOINT ["k8s-backup"]
